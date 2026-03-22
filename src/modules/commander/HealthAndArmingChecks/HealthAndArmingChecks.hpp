@@ -192,7 +192,7 @@ private:
 		&_mission_checks,
 		&_rally_point_checks,
 		&_offboard_checks, // must be after _estimator_checks
-		&_mode_checks, // must be after _estimator_checks, _home_position_checks, _mission_checks, _offboard_checks, _external_checks
+		&_mode_checks, // must be after _estimator_checks, _home_position_checks, _mission_checks, _external_checks
 		&_open_drone_id_checks,
 		&_parachute_checks,
 		&_power_checks,

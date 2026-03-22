@@ -71,22 +71,24 @@ protected:
 	// Helper to build a frame with raw payload bytes (no message type encoding)
 	std::vector<uint8_t> buildRawFrame(const std::vector<uint8_t> &payload)
 	{
-		std::vector<uint8_t> frame;
 		size_t payload_len = payload.size();
+		std::vector<uint8_t> frame(3 + payload_len + 3);
 
 		// Header: preamble + length
-		frame.push_back(RTCM3_PREAMBLE);
-		frame.push_back((payload_len >> 8) & 0x03);  // Upper 2 bits of length (reserved bits = 0)
-		frame.push_back(payload_len & 0xFF);         // Lower 8 bits of length
+		frame[0] = RTCM3_PREAMBLE;
+		frame[1] = (payload_len >> 8) & 0x03;  // Upper 2 bits of length (reserved bits = 0)
+		frame[2] = payload_len & 0xFF;         // Lower 8 bits of length
 
 		// Payload
-		frame.insert(frame.end(), payload.begin(), payload.end());
+		if (payload_len > 0) {
+			std::memcpy(&frame[3], payload.data(), payload_len);
+		}
 
 		// CRC
-		uint32_t crc = rtcm3_crc24q(frame.data(), frame.size());
-		frame.push_back((crc >> 16) & 0xFF);
-		frame.push_back((crc >> 8) & 0xFF);
-		frame.push_back(crc & 0xFF);
+		uint32_t crc = rtcm3_crc24q(frame.data(), 3 + payload_len);
+		frame[3 + payload_len] = (crc >> 16) & 0xFF;
+		frame[3 + payload_len + 1] = (crc >> 8) & 0xFF;
+		frame[3 + payload_len + 2] = crc & 0xFF;
 
 		return frame;
 	}

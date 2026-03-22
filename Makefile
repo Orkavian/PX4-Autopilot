@@ -162,6 +162,10 @@ else
 
 endif
 
+# Use the Python executable from the virtual environment if it exists,
+# otherwise fallback to system Python
+PYTHON_EXECUTABLE ?= $(if $(VIRTUAL_ENV),$(VIRTUAL_ENV)/bin/python)
+
 # Pick up specific Python path if set
 ifdef PYTHON_EXECUTABLE
 	override CMAKE_ARGS += -DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE}

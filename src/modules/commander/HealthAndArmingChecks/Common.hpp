@@ -333,6 +333,13 @@ private:
 	FRIEND_TEST(ReporterTest, basic_fail_all_modes);
 	FRIEND_TEST(ReporterTest, arming_checks_mode_category);
 	FRIEND_TEST(ReporterTest, arming_checks_mode_category2);
+	FRIEND_TEST(ReporterTest, offboard_check_no_signal_reports_event);
+	FRIEND_TEST(ReporterTest, offboard_check_timeout_reports_event);
+	FRIEND_TEST(ReporterTest, offboard_check_missing_setpoint_type_reports_event);
+	FRIEND_TEST(ReporterTest, offboard_check_position_requires_local_position);
+	FRIEND_TEST(ReporterTest, offboard_check_velocity_requires_local_velocity);
+	FRIEND_TEST(ReporterTest, offboard_check_acceleration_defers_to_attitude_error);
+	FRIEND_TEST(ReporterTest, offboard_check_valid_signal_allows_mode);
 	FRIEND_TEST(ReporterTest, reporting);
 	FRIEND_TEST(ReporterTest, reporting_multiple);
 

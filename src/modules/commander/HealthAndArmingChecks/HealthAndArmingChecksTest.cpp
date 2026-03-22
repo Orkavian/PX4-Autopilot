@@ -34,6 +34,8 @@
 #include <gtest/gtest.h>
 
 #include "Common.hpp"
+#include "checks/offboardCheck.hpp"
+#include <px4_platform_common/param.h>
 #include <uORB/topics/event.h>
 #include <uORB/Subscription.hpp>
 
@@ -56,9 +58,42 @@ public:
 	{
 		// ensure topic exists, otherwise we might lose first queued events
 		orb_advertise(ORB_ID(event), nullptr);
+
+		param_control_autosave(false);
+		param_t offboard_loss_timeout = param_find("COM_OF_LOSS_T");
+		ASSERT_NE(offboard_loss_timeout, PARAM_INVALID);
+
+		float timeout_s = 1.f;
+		ASSERT_EQ(param_set(offboard_loss_timeout, &timeout_s), PX4_OK);
 	}
 
 };
+
+static void clearEventQueue(uORB::Subscription &event_sub)
+{
+	event_s event;
+
+	while (event_sub.update(&event)) {}
+}
+
+static void expectEventSequence(uORB::Subscription &event_sub, std::initializer_list<uint32_t> event_ids)
+{
+	event_s event;
+
+	for (uint32_t event_id : event_ids) {
+		ASSERT_TRUE(event_sub.update(&event));
+		ASSERT_EQ(event.id, event_id);
+	}
+
+	ASSERT_FALSE(event_sub.updated());
+}
+
+static orb_advert_t advertiseOffboardControlMode(const offboard_control_mode_s &offboard_control_mode)
+{
+	orb_advert_t pub = orb_advertise(ORB_ID(offboard_control_mode), &offboard_control_mode);
+	EXPECT_NE(pub, nullptr);
+	return pub;
+}
 
 
 TEST_F(ReporterTest, basic_no_checks)
@@ -149,6 +184,237 @@ TEST_F(ReporterTest, arming_checks_mode_category2)
 	ASSERT_EQ((uint64_t)reporter.healthResults().is_present, 0);
 	ASSERT_EQ((uint64_t)reporter.healthResults().error, 0);
 	ASSERT_EQ(reporter.healthResults().warning, events::px4::enums::health_component_t::remote_control);
+}
+
+TEST_F(ReporterTest, offboard_check_no_signal_reports_event)
+{
+	failsafe_flags_s failsafe_flags{};
+	Report reporter{failsafe_flags, 0_s};
+	vehicle_status_s status{};
+	Context context{status};
+	OffboardChecks offboard_checks;
+
+	uORB::Subscription event_sub{ORB_ID(event)};
+	event_sub.subscribe();
+	clearEventQueue(event_sub);
+
+	reporter.reset();
+	reporter.failsafeFlags().mode_req_offboard_signal = 1u << vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	offboard_checks.checkAndReport(context, reporter);
+	reporter.finalize();
+	reporter.report(false);
+
+	ASSERT_TRUE(reporter.failsafeFlags().offboard_control_signal_lost);
+	ASSERT_FALSE(reporter.canRun(vehicle_status_s::NAVIGATION_STATE_OFFBOARD));
+	expectEventSequence(event_sub, {
+		events::ID("commander_arming_check_summary"),
+		events::ID("check_modes_offboard_no_signal"),
+		events::ID("commander_health_summary"),
+	});
+}
+
+TEST_F(ReporterTest, offboard_check_timeout_reports_event)
+{
+	failsafe_flags_s failsafe_flags{};
+	Report reporter{failsafe_flags, 0_s};
+	vehicle_status_s status{};
+	Context context{status};
+	OffboardChecks offboard_checks;
+
+	offboard_control_mode_s offboard_control_mode{};
+	offboard_control_mode.position = true;
+	offboard_control_mode.timestamp = hrt_absolute_time() - 2_s;
+	orb_advert_t offboard_pub = advertiseOffboardControlMode(offboard_control_mode);
+
+	uORB::Subscription event_sub{ORB_ID(event)};
+	event_sub.subscribe();
+	clearEventQueue(event_sub);
+
+	reporter.reset();
+	reporter.failsafeFlags().mode_req_offboard_signal = 1u << vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	offboard_checks.checkAndReport(context, reporter);
+	reporter.finalize();
+	reporter.report(false);
+
+	ASSERT_TRUE(reporter.failsafeFlags().offboard_control_signal_lost);
+	ASSERT_FALSE(reporter.canRun(vehicle_status_s::NAVIGATION_STATE_OFFBOARD));
+	expectEventSequence(event_sub, {
+		events::ID("commander_arming_check_summary"),
+		events::ID("check_modes_offboard_signal_lost"),
+		events::ID("commander_health_summary"),
+	});
+
+	ASSERT_EQ(orb_unadvertise(offboard_pub), PX4_OK);
+}
+
+TEST_F(ReporterTest, offboard_check_missing_setpoint_type_reports_event)
+{
+	failsafe_flags_s failsafe_flags{};
+	Report reporter{failsafe_flags, 0_s};
+	vehicle_status_s status{};
+	Context context{status};
+	OffboardChecks offboard_checks;
+
+	offboard_control_mode_s offboard_control_mode{};
+	offboard_control_mode.timestamp = hrt_absolute_time();
+	orb_advert_t offboard_pub = advertiseOffboardControlMode(offboard_control_mode);
+
+	uORB::Subscription event_sub{ORB_ID(event)};
+	event_sub.subscribe();
+	clearEventQueue(event_sub);
+
+	reporter.reset();
+	reporter.failsafeFlags().mode_req_offboard_signal = 1u << vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	offboard_checks.checkAndReport(context, reporter);
+	reporter.finalize();
+	reporter.report(false);
+
+	ASSERT_TRUE(reporter.failsafeFlags().offboard_control_signal_lost);
+	ASSERT_FALSE(reporter.canRun(vehicle_status_s::NAVIGATION_STATE_OFFBOARD));
+	expectEventSequence(event_sub, {
+		events::ID("commander_arming_check_summary"),
+		events::ID("check_modes_offboard_no_setpoint_type"),
+		events::ID("commander_health_summary"),
+	});
+
+	ASSERT_EQ(orb_unadvertise(offboard_pub), PX4_OK);
+}
+
+TEST_F(ReporterTest, offboard_check_position_requires_local_position)
+{
+	failsafe_flags_s failsafe_flags{};
+	Report reporter{failsafe_flags, 0_s};
+	vehicle_status_s status{};
+	Context context{status};
+	OffboardChecks offboard_checks;
+
+	offboard_control_mode_s offboard_control_mode{};
+	offboard_control_mode.position = true;
+	offboard_control_mode.timestamp = hrt_absolute_time();
+	orb_advert_t offboard_pub = advertiseOffboardControlMode(offboard_control_mode);
+
+	uORB::Subscription event_sub{ORB_ID(event)};
+	event_sub.subscribe();
+	clearEventQueue(event_sub);
+
+	reporter.reset();
+	reporter.failsafeFlags().mode_req_offboard_signal = 1u << vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	reporter.failsafeFlags().local_position_invalid = true;
+	offboard_checks.checkAndReport(context, reporter);
+	reporter.finalize();
+	reporter.report(false);
+
+	ASSERT_TRUE(reporter.failsafeFlags().offboard_control_signal_lost);
+	ASSERT_FALSE(reporter.canRun(vehicle_status_s::NAVIGATION_STATE_OFFBOARD));
+	expectEventSequence(event_sub, {
+		events::ID("commander_arming_check_summary"),
+		events::ID("check_modes_offboard_local_position"),
+		events::ID("commander_health_summary"),
+	});
+
+	ASSERT_EQ(orb_unadvertise(offboard_pub), PX4_OK);
+}
+
+TEST_F(ReporterTest, offboard_check_velocity_requires_local_velocity)
+{
+	failsafe_flags_s failsafe_flags{};
+	Report reporter{failsafe_flags, 0_s};
+	vehicle_status_s status{};
+	Context context{status};
+	OffboardChecks offboard_checks;
+
+	offboard_control_mode_s offboard_control_mode{};
+	offboard_control_mode.velocity = true;
+	offboard_control_mode.timestamp = hrt_absolute_time();
+	orb_advert_t offboard_pub = advertiseOffboardControlMode(offboard_control_mode);
+
+	uORB::Subscription event_sub{ORB_ID(event)};
+	event_sub.subscribe();
+	clearEventQueue(event_sub);
+
+	reporter.reset();
+	reporter.failsafeFlags().mode_req_offboard_signal = 1u << vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	reporter.failsafeFlags().local_velocity_invalid = true;
+	offboard_checks.checkAndReport(context, reporter);
+	reporter.finalize();
+	reporter.report(false);
+
+	ASSERT_TRUE(reporter.failsafeFlags().offboard_control_signal_lost);
+	ASSERT_FALSE(reporter.canRun(vehicle_status_s::NAVIGATION_STATE_OFFBOARD));
+	expectEventSequence(event_sub, {
+		events::ID("commander_arming_check_summary"),
+		events::ID("check_modes_offboard_local_velocity"),
+		events::ID("commander_health_summary"),
+	});
+
+	ASSERT_EQ(orb_unadvertise(offboard_pub), PX4_OK);
+}
+
+TEST_F(ReporterTest, offboard_check_acceleration_defers_to_attitude_error)
+{
+	failsafe_flags_s failsafe_flags{};
+	Report reporter{failsafe_flags, 0_s};
+	vehicle_status_s status{};
+	Context context{status};
+	OffboardChecks offboard_checks;
+
+	offboard_control_mode_s offboard_control_mode{};
+	offboard_control_mode.acceleration = true;
+	offboard_control_mode.timestamp = hrt_absolute_time();
+	orb_advert_t offboard_pub = advertiseOffboardControlMode(offboard_control_mode);
+
+	uORB::Subscription event_sub{ORB_ID(event)};
+	event_sub.subscribe();
+	clearEventQueue(event_sub);
+
+	reporter.reset();
+	reporter.failsafeFlags().mode_req_offboard_signal = 1u << vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	reporter.failsafeFlags().attitude_invalid = true;
+	offboard_checks.checkAndReport(context, reporter);
+	reporter.finalize();
+	reporter.report(false);
+
+	ASSERT_TRUE(reporter.failsafeFlags().offboard_control_signal_lost);
+	ASSERT_FALSE(reporter.canRun(vehicle_status_s::NAVIGATION_STATE_OFFBOARD));
+	expectEventSequence(event_sub, {
+		events::ID("commander_arming_check_summary"),
+		events::ID("commander_health_summary"),
+	});
+
+	ASSERT_EQ(orb_unadvertise(offboard_pub), PX4_OK);
+}
+
+TEST_F(ReporterTest, offboard_check_valid_signal_allows_mode)
+{
+	failsafe_flags_s failsafe_flags{};
+	Report reporter{failsafe_flags, 0_s};
+	vehicle_status_s status{};
+	Context context{status};
+	OffboardChecks offboard_checks;
+
+	offboard_control_mode_s offboard_control_mode{};
+	offboard_control_mode.position = true;
+	offboard_control_mode.timestamp = hrt_absolute_time();
+	orb_advert_t offboard_pub = advertiseOffboardControlMode(offboard_control_mode);
+
+	uORB::Subscription event_sub{ORB_ID(event)};
+	event_sub.subscribe();
+	clearEventQueue(event_sub);
+
+	reporter.reset();
+	reporter.failsafeFlags().mode_req_offboard_signal = 1u << vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	offboard_checks.checkAndReport(context, reporter);
+	reporter.finalize();
+	reporter.report(false);
+
+	ASSERT_FALSE(reporter.failsafeFlags().offboard_control_signal_lost);
+	ASSERT_TRUE(reporter.canRun(vehicle_status_s::NAVIGATION_STATE_OFFBOARD));
+	expectEventSequence(event_sub, {
+		events::ID("commander_arming_check_summary"),
+		events::ID("commander_health_summary"),
+	});
+
+	ASSERT_EQ(orb_unadvertise(offboard_pub), PX4_OK);
 }
 
 TEST_F(ReporterTest, reporting)

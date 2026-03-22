@@ -39,29 +39,117 @@ void OffboardChecks::checkAndReport(const Context &context, Report &reporter)
 {
 	reporter.failsafeFlags().offboard_control_signal_lost = true;
 
+	enum class OffboardFailureReason {
+		NoSignal,
+		SignalLost,
+		NoSetpointType,
+		LocalPositionInvalid,
+		LocalVelocityInvalid,
+		None,
+	};
+
 	offboard_control_mode_s offboard_control_mode;
+	OffboardFailureReason failure_reason = OffboardFailureReason::NoSignal;
+	bool offboard_available = false;
 
 	if (_offboard_control_mode_sub.copy(&offboard_control_mode)) {
+		const bool has_active_setpoints = offboard_control_mode.position || offboard_control_mode.velocity
+					  || offboard_control_mode.acceleration || offboard_control_mode.attitude || offboard_control_mode.body_rate
+					  || offboard_control_mode.thrust_and_torque || offboard_control_mode.direct_actuator;
 
-		bool data_is_recent = hrt_absolute_time() < offboard_control_mode.timestamp
-				      + static_cast<hrt_abstime>(_param_com_of_loss_t.get() * 1_s);
+		const bool data_is_recent = hrt_absolute_time() < offboard_control_mode.timestamp
+					    + static_cast<hrt_abstime>(_param_com_of_loss_t.get() * 1_s);
 
-		bool offboard_available = (offboard_control_mode.position || offboard_control_mode.velocity
-					   || offboard_control_mode.acceleration || offboard_control_mode.attitude || offboard_control_mode.body_rate
-					   || offboard_control_mode.thrust_and_torque || offboard_control_mode.direct_actuator) && data_is_recent;
+		offboard_available = has_active_setpoints && data_is_recent;
 
-		if (offboard_control_mode.position && reporter.failsafeFlags().local_position_invalid) {
+		if (!has_active_setpoints) {
 			offboard_available = false;
+			failure_reason = OffboardFailureReason::NoSetpointType;
+
+		} else if (!data_is_recent) {
+			offboard_available = false;
+			failure_reason = OffboardFailureReason::SignalLost;
+
+		} else if (offboard_control_mode.position && reporter.failsafeFlags().local_position_invalid) {
+			offboard_available = false;
+			failure_reason = OffboardFailureReason::LocalPositionInvalid;
 
 		} else if (offboard_control_mode.velocity && reporter.failsafeFlags().local_velocity_invalid) {
 			offboard_available = false;
+			failure_reason = OffboardFailureReason::LocalVelocityInvalid;
 
 		} else if (offboard_control_mode.acceleration && reporter.failsafeFlags().attitude_invalid) {
 			// OFFBOARD acceleration handled by position controller
 			offboard_available = false;
-		}
+			failure_reason = OffboardFailureReason::None;
 
-		// This is a mode requirement, no need to report
-		reporter.failsafeFlags().offboard_control_signal_lost = !offboard_available;
+		} else {
+			failure_reason = OffboardFailureReason::None;
+		}
+	}
+
+	reporter.failsafeFlags().offboard_control_signal_lost = !offboard_available;
+
+	if (!offboard_available) {
+		const NavModes required_modes = (NavModes)reporter.failsafeFlags().mode_req_offboard_signal;
+
+		if (required_modes != NavModes::None) {
+			switch (failure_reason) {
+			case OffboardFailureReason::NoSignal:
+				/* EVENT
+				 * @description
+				 * The offboard component is not sending offboard control updates.
+				 */
+				reporter.armingCheckFailure(required_modes, health_component_t::system,
+							    events::ID("check_modes_offboard_no_signal"),
+							    events::Log::Error, "No offboard signal");
+				break;
+
+			case OffboardFailureReason::SignalLost:
+				/* EVENT
+				 * @description
+				 * The offboard component stopped sending updates in time. Check the companion link and stream rate.
+				 */
+				reporter.armingCheckFailure(required_modes, health_component_t::system,
+							    events::ID("check_modes_offboard_signal_lost"),
+							    events::Log::Error, "Offboard signal lost");
+				break;
+
+			case OffboardFailureReason::NoSetpointType:
+				/* EVENT
+				 * @description
+				 * Enable at least one offboard control mode in the companion computer stream.
+				 */
+				reporter.armingCheckFailure(required_modes, health_component_t::system,
+							    events::ID("check_modes_offboard_no_setpoint_type"),
+							    events::Log::Error, "No offboard setpoint type enabled");
+				break;
+
+			case OffboardFailureReason::LocalPositionInvalid:
+				/* EVENT
+				 * @description
+				 * Offboard position control requires a valid local position estimate.
+				 */
+				reporter.armingCheckFailure(required_modes, health_component_t::local_position_estimate,
+							    events::ID("check_modes_offboard_local_position"),
+							    events::Log::Error, "Offboard position control requires valid local position estimate");
+				break;
+
+			case OffboardFailureReason::LocalVelocityInvalid:
+				/* EVENT
+				 * @description
+				 * Offboard velocity control requires a valid local velocity estimate.
+				 */
+				reporter.armingCheckFailure(required_modes, health_component_t::local_position_estimate,
+							    events::ID("check_modes_offboard_local_velocity"),
+							    events::Log::Error, "Offboard velocity control requires valid local velocity estimate");
+				break;
+
+			case OffboardFailureReason::None:
+				break;
+			}
+
+			reporter.clearCanRunBits(required_modes);
+		}
 	}
 }
